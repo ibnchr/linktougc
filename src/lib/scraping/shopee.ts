@@ -1,141 +1,95 @@
-import { chromium } from "playwright";
 import { parseShopeeUrl } from "@/lib/utils";
 import type { ProductInfo, ScrapeResult } from "@/types";
-
-const STEALTH_ARGS = [
-  "--disable-blink-features=AutomationControlled",
-  "--no-sandbox",
-];
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-async function scrapeViaPlaywright(
+interface ShopeeItem {
+  name?: string;
+  price?: number;
+  price_min?: number;
+  price_max?: number;
+  description?: string;
+  images?: string[];
+  item_rating?: { rating_star?: number };
+  sold?: number;
+  historical_sold?: number;
+}
+
+async function scrapeViaHttp(
   url: string,
   shopId: string,
   itemId: string
 ): Promise<ProductInfo | null> {
-  const browser = await chromium.launch({ headless: true, args: STEALTH_ARGS });
-  const context = await browser.newContext({
-    userAgent: USER_AGENT,
-    viewport: { width: 1280, height: 800 },
-    locale: "id-ID",
-  });
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => false });
-  });
-  const page = await context.newPage();
+  const base = "https://shopee.co.id";
 
-  // Intercept API response untuk price & data lengkap
-  let apiItem: any = null;
-  page.on("response", async (res) => {
-    if (res.url().includes("/api/v4/item/get") && res.ok()) {
-      try {
-        const json = await res.json();
-        if (json.data?.item) apiItem = json.data.item;
-      } catch {}
-    }
+  const cookieRes = await fetch(base, {
+    headers: { "User-Agent": USER_AGENT },
+  });
+  const cookies = cookieRes.headers.getSetCookie?.()?.join("; ") || "";
+  const csrfToken = cookies.match(/csrf_token=([^;]+)/)?.[1] || "";
+
+  const apiUrl = `${base}/api/v4/item/get?item_id=${itemId}&shop_id=${shopId}`;
+  const apiRes = await fetch(apiUrl, {
+    headers: {
+      "User-Agent": USER_AGENT,
+      Cookie: cookies,
+      Accept: "application/json",
+      Referer: url,
+      ...(csrfToken ? { "x-csrftoken": csrfToken } : {}),
+    },
   });
 
-  try {
-    // Step 1: Buka homepage dulu untuk cookies
-    await page.goto("https://shopee.co.id", {
-      waitUntil: "domcontentloaded",
-      timeout: 20000,
-    });
-    await page.waitForTimeout(1500);
-
-    // Step 2: Navigasi ke product page
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await page.waitForTimeout(3000);
-
-    const redirected = page.url().includes("verify/traffic");
-    if (redirected) return null;
-
-    // Jika API terintercept, gunakan data lengkap
-    if (apiItem) {
-      return {
-        title: apiItem.name ?? "",
-        price: Math.round((apiItem.price ?? 0) / 100000),
-        priceOriginal:
-          apiItem.price_max && apiItem.price_max !== apiItem.price
-            ? Math.round(apiItem.price_max / 100000)
-            : undefined,
-        description: (apiItem.description ?? "").substring(0, 250),
-        images: (apiItem.images ?? []).map(
-          (img: string) => `https://cf.shopee.co.id/file/${img}`
-        ),
-        rating: apiItem.rating_star ?? undefined,
-        sold: apiItem.sold ?? apiItem.historical_sold ?? undefined,
-        platform: "shopee",
-        url,
-      };
-    }
-
-    // Fallback: MFE data + price dari DOM
-    const productData = await page.evaluate(
-      ({ shopId, itemId }) => {
-        const mfe = document.querySelector(
-          'script[type="text/mfe-initial-data"]'
-        );
-        if (!mfe) return null;
-
-        try {
-          const parsed = JSON.parse(mfe.textContent || "{}");
-          const state = parsed.initialState;
-          const cacheKey = `${shopId}/${itemId}`;
-          const cached =
-            state.DOMAIN_PDP?.data?.PDP_BFF_DATA?.cachedMap?.[cacheKey]?.item;
-          if (!cached) return null;
-
-          const itemImages = state.item?.items?.[itemId]?.images || [];
-          const allImages = [cached.image, ...itemImages].filter(Boolean);
-
-          // Price dari DOM
-          const priceText =
-            document
-              .querySelector('[class*="productPrice"]')
-              ?.textContent?.trim()
-              ?.replace(/[^0-9]/g, "") ||
-            document
-              .querySelector('[class*="price"]')
-              ?.textContent?.trim()
-              ?.replace(/[^0-9]/g, "") ||
-            "";
-          const domPrice = parseInt(priceText, 10) || 0;
-
-          return {
-            title: cached.title || "",
-            price: domPrice,
-            description: (cached.description || "").substring(0, 250),
-            images: allImages.map(
-              (img: string) => `https://cf.shopee.co.id/file/${img}`
-            ),
-            rating: cached.item_rating?.rating_star ?? undefined,
-            sold: cached.historical_sold ?? undefined,
-          };
-        } catch {
-          return null;
-        }
-      },
-      { shopId, itemId }
+  if (!apiRes.ok) {
+    const fallbackRes = await fetch(
+      `${base}/api/v4/product/get_shop_item?shop_id=${shopId}&item_id=${itemId}`,
+      { headers: { "User-Agent": USER_AGENT, Cookie: cookies } }
     );
+    if (!fallbackRes.ok) return null;
+    const fallbackData = await fallbackRes.json();
+    if (!fallbackData?.data?.item) return null;
 
-    if (!productData?.title) return null;
-
+    const item: ShopeeItem = fallbackData.data.item;
     return {
-      title: productData.title,
-      price: productData.price,
-      description: productData.description,
-      images: [...new Set(productData.images)].slice(0, 8),
-      rating: productData.rating,
-      sold: productData.sold,
+      title: item.name ?? "",
+      price: Math.round((item.price ?? 0) / 100000),
+      priceOriginal:
+        item.price_max && item.price_max !== item.price
+          ? Math.round(item.price_max / 100000)
+          : undefined,
+      description: (item.description ?? "").substring(0, 250),
+      images: (item.images ?? [])
+        .slice(0, 8)
+        .map((img: string) => `https://cf.shopee.co.id/file/${img}`),
+      rating: item.item_rating?.rating_star ?? undefined,
+      sold: item.historical_sold ?? item.sold ?? undefined,
       platform: "shopee",
       url,
     };
-  } finally {
-    await browser.close();
   }
+
+  const data = await apiRes.json();
+  const item: ShopeeItem | undefined = data.data?.item;
+  if (!item?.name) return null;
+
+  const hasVariants =
+    item.price_min && item.price_max && item.price_min !== item.price_max;
+
+  return {
+    title: item.name,
+    price: Math.round((hasVariants ? item.price_min! : item.price ?? 0) / 100000),
+    priceOriginal: hasVariants
+      ? Math.round((item.price_max ?? 0) / 100000)
+      : undefined,
+    description: (item.description ?? "").substring(0, 250),
+    images: (item.images ?? [])
+      .slice(0, 8)
+      .map((img: string) => `https://cf.shopee.co.id/file/${img}`),
+    rating: item.item_rating?.rating_star ?? undefined,
+    sold: item.historical_sold ?? item.sold ?? undefined,
+    platform: "shopee",
+    url,
+  };
 }
 
 export async function scrapeShopee(url: string): Promise<ScrapeResult> {
@@ -149,7 +103,7 @@ export async function scrapeShopee(url: string): Promise<ScrapeResult> {
       };
     }
 
-    const product = await scrapeViaPlaywright(url, parsed.shopId, parsed.itemId);
+    const product = await scrapeViaHttp(url, parsed.shopId, parsed.itemId);
 
     if (!product?.title) {
       return {

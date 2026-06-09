@@ -1,7 +1,8 @@
-import { execSync, exec } from "child_process";
+import { exec } from "child_process";
 import fs from "fs";
 import path from "path";
 import util from "util";
+import ffmpegPath from "ffmpeg-static";
 import type { UgcScript, ProductInfo } from "@/types";
 
 const execPromise = util.promisify(exec);
@@ -10,8 +11,19 @@ const GENERATED_DIR = path.join(process.cwd(), "public", "generated");
 const API_KEY = process.env.VEO_API_KEY || process.env.GEMINI_API_KEY || "";
 const mockMode = !API_KEY || process.env.VEO_MOCK === "true";
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+const FONT_PATHS = [
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+  "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+  "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+  "/usr/share/fonts/TTF/DejaVuSans.ttf",
+  path.join(process.cwd(), "public", "font.ttf"),
+];
+
+function findFont(): string {
+  for (const p of FONT_PATHS) {
+    if (fs.existsSync(p)) return p;
+  }
+  return "fonts/DejaVuSans.ttf";
 }
 
 function escapeDrawtext(text: string): string {
@@ -39,6 +51,14 @@ function splitText(text: string, maxChars: number): string[] {
   return lines;
 }
 
+let fontFile: string | null = null;
+
+function getFont(): string {
+  if (fontFile) return fontFile;
+  fontFile = findFont();
+  return fontFile;
+}
+
 function buildDrawtextFilter(text: string, yPos: number, fontSize: number): string {
   const lines = splitText(text, 28);
   const lineHeight = Math.round(fontSize * 1.3);
@@ -48,7 +68,7 @@ function buildDrawtextFilter(text: string, yPos: number, fontSize: number): stri
   return lines
     .map((line, i) => {
       const y = startY + (i === 0 ? 0 : (i * lineHeight));
-      return `drawtext=text='${escapeDrawtext(line)}':x=(w-text_w)/2:y=${y}:fontsize=${fontSize}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=12:fontfile='C\\:\\\\Windows\\\\Fonts\\\\arial.ttf'`;
+      return `drawtext=text='${escapeDrawtext(line)}':x=(w-text_w)/2:y=${y}:fontsize=${fontSize}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=12:fontfile='${getFont()}'`;
     })
     .join(",");
 }
@@ -148,7 +168,8 @@ async function generateWithFfmpeg(
     const filterComplex = filterParts.join("; ");
     const totalDuration = validImages.length * duration - (validImages.length - 1) * fadeDur;
 
-    const cmd = `ffmpeg ${inputFiles} -filter_complex "${filterComplex}" -map "${prev}" -c:v libx264 -pix_fmt yuv420p -r 30 -t ${totalDuration} -preset ultrafast -y "${outputPath}" 2>&1`;
+    const ffmpegBin = ffmpegPath || "ffmpeg";
+    const cmd = `"${ffmpegBin}" ${inputFiles} -filter_complex "${filterComplex}" -map "${prev}" -c:v libx264 -pix_fmt yuv420p -r 30 -t ${totalDuration} -preset ultrafast -y "${outputPath}" 2>&1`;
 
     console.log(`  🎬 FFmpeg cmd length: ${cmd.length} chars`);
     const { stderr } = await execPromise(cmd);

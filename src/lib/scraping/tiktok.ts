@@ -385,109 +385,6 @@ async function tryPageScrape(resolvedUrl: string): Promise<ProductInfo | null> {
   return null;
 }
 
-async function tryPlaywright(resolvedUrl: string): Promise<ProductInfo | null> {
-  try {
-    const { chromium } = await import("@playwright/test");
-    const browser = await chromium.launch({ headless: true });
-    try {
-      const context = await browser.newContext({
-        userAgent: USER_AGENT,
-        locale: "id-ID",
-      });
-      const page = await context.newPage();
-      await page.goto(resolvedUrl, {
-        waitUntil: "networkidle",
-        timeout: 30000,
-      });
-
-      const result = await page.evaluate(() => {
-        const nextEl = document.getElementById("__NEXT_DATA__");
-        if (nextEl?.textContent) {
-          try {
-            return { source: "nextData", data: JSON.parse(nextEl.textContent) };
-          } catch {}
-        }
-
-        const ldScripts = document.querySelectorAll(
-          'script[type="application/ld+json"]',
-        );
-        for (const s of ldScripts) {
-          try {
-            const p = JSON.parse(s.textContent || "{}");
-            if (p["@type"] === "Product") {
-              return { source: "jsonLd", data: p };
-            }
-          } catch {}
-        }
-
-        const titleEl =
-          document.querySelector(
-            '[class*="title" i][class*="product" i], h1, [class*="product-name" i]',
-          ) ??
-          document.querySelector('[data-e2e="product-title"]');
-
-        const priceEl = document.querySelector(
-          '[class*="price" i], [data-e2e="product-price"]',
-        );
-
-        const imgs: string[] = [];
-        const allImages = document.querySelectorAll<HTMLImageElement>(
-          "img[src*=\"tiktokcdn\"], img[src*=\"p16-\"], img[src*=\"ibyteimg\"]",
-        );
-        allImages.forEach((img) => {
-          const src = img.getAttribute("src") ?? img.getAttribute("data-src");
-          if (src && !imgs.includes(src)) imgs.push(src);
-        });
-
-        return {
-          source: "dom",
-          data: {
-            title: titleEl?.textContent?.trim() ?? "",
-            price: priceEl?.textContent?.trim() ?? "",
-            images: imgs,
-          },
-        };
-      });
-
-      if (result.source === "nextData" && result.data) {
-        const product = extractNextDataProduct(result.data);
-        if (product) {
-          product.url = resolvedUrl;
-          return product;
-        }
-      }
-
-      if (result.source === "jsonLd" && result.data) {
-        const product = extractProductFromJsonLd(result.data, resolvedUrl);
-        if (product) return product;
-      }
-
-      if (result.source === "dom" && result.data) {
-        const d = result.data as { title: string; price: string; images: string[] };
-        if (d.title && d.images.length > 0) {
-          const price =
-            parseFloat(d.price.replace(/[^0-9.,]/g, "").replace(/,/g, "")) || 0;
-          const product: ProductInfo = {
-            title: d.title,
-            price,
-            description: "",
-            images: d.images.slice(0, 8),
-            platform: "tiktok",
-            url: resolvedUrl,
-          };
-          return product;
-        }
-      }
-
-      return null;
-    } finally {
-      await browser.close();
-    }
-  } catch {
-    return null;
-  }
-}
-
 export async function scrapeTiktok(url: string): Promise<ScrapeResult> {
   try {
     const isShortUrl = /vm\.tiktok\.com/i.test(url);
@@ -505,11 +402,6 @@ export async function scrapeTiktok(url: string): Promise<ScrapeResult> {
     const pageResult = await tryPageScrape(resolvedUrl);
     if (pageResult) {
       return { success: true, product: pageResult };
-    }
-
-    const playwrightResult = await tryPlaywright(resolvedUrl);
-    if (playwrightResult) {
-      return { success: true, product: playwrightResult };
     }
 
     return {
